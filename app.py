@@ -1073,6 +1073,12 @@ PAGE_HTML = """
         .hidden {
             display: none;
         }
+
+        .help {
+            cursor: help;
+            text-decoration: underline dotted var(--muted);
+            text-underline-offset: 3px;
+        }
     </style>
 </head>
 
@@ -1181,6 +1187,23 @@ PAGE_HTML = """
     let historyLoaded = false;
     let historyLoadInProgress = false;
 
+    const HELP_FA = {
+        link: "وضعیت لینک اینترفیس (operstate). OK یعنی up.",
+        gateway: "نتیجه پینگ به Gateway از مبدا این WAN (با Source IP).",
+        internet: "نتیجه پینگ به اینترنت از مبدا این WAN. اولین IP پاسخ‌گو از لیست تست انتخاب می‌شود.",
+        default: "DEFAULT یعنی مسیر default فعلی سیستم روی همین WAN است.",
+        standby: "STANDBY یعنی الان default route روی این WAN نیست.",
+        sourceIp: "این IP برای bind کردن تست‌ها استفاده می‌شود (ping با گزینه -I).",
+        metric: "Metric کمتر یعنی اولویت بالاتر در انتخاب مسیر.",
+        iface: "نام اینترفیس از روی Source IP و خروجی ip address تشخیص داده می‌شود.",
+        ifStats: "Drop/Err شمارنده‌های تجمعی RX/TX از /sys/class/net/<iface>/statistics (از زمان boot).",
+        totals: "مجموع ترافیک خوانده‌شده از nftables counterها (تجمعی).",
+        healthCheck: "چند ثانیه از آخرین تست سلامت (gateway/internet) گذشته.",
+        rttLoss: "RTT = میانگین زمان پاسخ ping (ms). Loss = درصد پینگ‌های ناموفق در پنجرهٔ آخر.",
+        jitter: "Jitter = نوسان RTT (انحراف معیار) در پنجرهٔ آخر.",
+        target: "Target = IP تست اینترنتی که پاسخ داده.",
+    };
+
     const paletteVars = ["--blue", "--purple", "--green", "--yellow", "--red"];
     let cachedPalette = null;
 
@@ -1266,15 +1289,22 @@ PAGE_HTML = """
     }
 
     function statusBadge(value, label) {
+        let tip = "";
+        if (label === "Link") tip = HELP_FA.link;
+        else if (label === "Gateway") tip = HELP_FA.gateway;
+        else if (label === "Internet") tip = HELP_FA.internet;
+
+        const title = tip ? ` title="${tip}"` : "";
+
         if (value === true) {
-            return `<span class="badge ok">${label} OK</span>`;
+            return `<span class="badge ok"${title}>${label} OK</span>`;
         }
 
         if (value === false) {
-            return `<span class="badge bad">${label} DOWN</span>`;
+            return `<span class="badge bad"${title}>${label} DOWN</span>`;
         }
 
-        return `<span class="badge unknown">${label} CHECKING</span>`;
+        return `<span class="badge unknown"${title}>${label} CHECKING</span>`;
     }
 
     function showMessage(text) {
@@ -1497,6 +1527,8 @@ PAGE_HTML = """
                 ? "-"
                 : `Drop ${wan.iface_rx_dropped}/${wan.iface_tx_dropped} | Err ${wan.iface_rx_errors}/${wan.iface_tx_errors}`;
 
+            const defaultTip = isActive ? HELP_FA.default : HELP_FA.standby;
+
             div.innerHTML = `
                 <div class="wan-title">${wan.id} - ${wan.name}</div>
 
@@ -1504,33 +1536,33 @@ PAGE_HTML = """
                     ${statusBadge(wan.iface_up, "Link")}
                     ${statusBadge(wan.gateway_online, "Gateway")}
                     ${statusBadge(wan.internet_online, "Internet")}
-                    <span class="badge ${isActive ? "active" : "standby"}">
+                    <span class="badge ${isActive ? "active" : "standby"}" title="${defaultTip}">
                         ${isActive ? "DEFAULT" : "STANDBY"}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span>Source IP</span>
+                    <span class="help" title="${HELP_FA.sourceIp}">Source IP</span>
                     <span class="value">${wan.source_ip}</span>
                 </div>
 
                 <div class="row">
-                    <span>Gateway</span>
+                    <span class="help" title="${HELP_FA.gateway}">Gateway</span>
                     <span class="value">${wan.gateway}</span>
                 </div>
 
                 <div class="row">
-                    <span>Metric</span>
+                    <span class="help" title="${HELP_FA.metric}">Metric</span>
                     <span class="value">${wan.metric}</span>
                 </div>
 
                 <div class="row">
-                    <span>Interface</span>
+                    <span class="help" title="${HELP_FA.iface}">Interface</span>
                     <span class="value">${ifaceText}</span>
                 </div>
 
                 <div class="row">
-                    <span>IF Drop/Err (RX/TX)</span>
+                    <span class="help" title="${HELP_FA.ifStats}">IF Drop/Err (RX/TX)</span>
                     <span class="value">${ifStats}</span>
                 </div>
 
@@ -1547,37 +1579,37 @@ PAGE_HTML = """
                 </div>
 
                 <div class="row">
-                    <span>Total Download</span>
+                    <span class="help" title="${HELP_FA.totals}">Total Download</span>
                     <span class="value">${formatBytes(wan.download_total)}</span>
                 </div>
 
                 <div class="row">
-                    <span>Total Upload</span>
+                    <span class="help" title="${HELP_FA.totals}">Total Upload</span>
                     <span class="value">${formatBytes(wan.upload_total)}</span>
                 </div>
 
                 <div class="row">
-                    <span>Health Check</span>
+                    <span class="help" title="${HELP_FA.healthCheck}">Health Check</span>
                     <span class="value">${checkedAgo}s ago</span>
                 </div>
 
                 <div class="row">
-                    <span>GW RTT / Loss</span>
+                    <span class="help" title="${HELP_FA.rttLoss}">GW RTT / Loss</span>
                     <span class="value">${formatMs(wan.gateway_rtt_ms)} / ${formatPct(wan.gateway_loss_percent)}</span>
                 </div>
 
                 <div class="row">
-                    <span>GW Jitter</span>
+                    <span class="help" title="${HELP_FA.jitter}">GW Jitter</span>
                     <span class="value">${formatMs(wan.gateway_jitter_ms)}</span>
                 </div>
 
                 <div class="row">
-                    <span>NET RTT / Loss</span>
+                    <span class="help" title="${HELP_FA.rttLoss}">NET RTT / Loss</span>
                     <span class="value">${formatMs(wan.internet_rtt_ms)} / ${formatPct(wan.internet_loss_percent)}</span>
                 </div>
 
                 <div class="row">
-                    <span>NET Jitter / Target</span>
+                    <span class="help" title="${HELP_FA.jitter} ${HELP_FA.target}">NET Jitter / Target</span>
                     <span class="value">${formatMs(wan.internet_jitter_ms)} / ${(wan.internet_target || "-")}</span>
                 </div>
             `;
