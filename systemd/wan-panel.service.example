@@ -1,0 +1,21 @@
+[Unit]
+Description=WAN Live Panel (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wan-panel
+Environment=WAN_PANEL_CONFIG=/opt/wan-panel/config.json
+ExecStart=/usr/bin/python3 /opt/wan-panel/app.py
+Restart=always
+RestartSec=2
+
+# NOTE:
+# - This service may need enough privileges to run `nft`/`ip`/`ping`.
+# - If you run as non-root, ensure ping has proper capabilities and nft/ip reads are allowed.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

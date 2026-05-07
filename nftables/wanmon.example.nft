@@ -1,0 +1,25 @@
+# Example nftables table/counters for WAN Live Panel
+#
+# The app reads counter bytes via:
+#   nft -j list counters table inet wanmon
+#
+# You must:
+# - create the table (family/name matches config.json)
+# - create counter objects whose names match each WAN's upload_counter/download_counter
+# - reference those counters from rules that match your traffic
+#
+# This is a skeleton only — adapt rules to your routing/firewall design.
+
+table inet wanmon {
+  # Counter objects (names must match your config)
+  counter wan1_upload {}
+  counter wan1_download {}
+
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+
+    # Examples (edit to fit your network):
+    # ip saddr 192.0.2.10 counter name "wan1_upload"
+    # ip daddr 192.0.2.10 counter name "wan1_download"
+  }
+}
