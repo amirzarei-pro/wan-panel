@@ -1186,6 +1186,7 @@ PAGE_HTML = """
     let wanOrder = [];
     let historyLoaded = false;
     let historyLoadInProgress = false;
+    const hoveredCards = {};
 
     const HELP_FA = {
         link: "وضعیت لینک اینترفیس (operstate). OK یعنی up.",
@@ -1312,6 +1313,19 @@ PAGE_HTML = """
         box.innerText = text;
         setTimeout(() => box.innerText = "", 7000);
     }
+
+    // Click/tap fallback for devices without hover
+    document.addEventListener("click", (ev) => {
+        const el = ev.target && ev.target.closest
+            ? ev.target.closest(".help, .badge")
+            : null;
+
+        if (!el) return;
+        const tip = el.getAttribute("title");
+        if (tip) {
+            showMessage(tip);
+        }
+    });
 
     async function loadHistoryOnce() {
         if (historyLoaded || historyLoadInProgress) return;
@@ -1495,6 +1509,15 @@ PAGE_HTML = """
                 const div = document.createElement("div");
                 div.className = "card";
                 div.id = "card-" + wan.id;
+
+                div.addEventListener("mouseenter", () => {
+                    hoveredCards[wan.id] = true;
+                });
+
+                div.addEventListener("mouseleave", () => {
+                    hoveredCards[wan.id] = false;
+                });
+
                 cards.appendChild(div);
             });
         }
@@ -1502,6 +1525,11 @@ PAGE_HTML = """
         data.wans.forEach(wan => {
             const isActive = data.default_wan === wan.id;
             const div = document.getElementById("card-" + wan.id);
+
+            // Keep DOM stable while hovered so tooltips can appear
+            if (hoveredCards[wan.id]) {
+                return;
+            }
 
             const last = lastRenderedSpeeds[wan.id] || {};
             const downloadChanged = last.download_mbps !== wan.download_mbps;
