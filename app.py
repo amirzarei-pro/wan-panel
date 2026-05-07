@@ -191,6 +191,13 @@ current_snapshot = {
 history = deque(maxlen=HISTORY_LIMIT)
 
 
+IP_IFACE_CACHE_TTL_SECONDS = 30.0
+_ip_iface_cache = {
+    "timestamp": 0.0,
+    "map": {},
+}
+
+
 def run_command(args: Sequence[str], timeout: float = 3.0):
     try:
         result = subprocess.run(
@@ -305,6 +312,100 @@ def _read_first_line(path: str) -> str | None:
             return f.readline().strip()
     except OSError:
         return None
+
+
+def _read_int(path: str) -> int | None:
+    line = _read_first_line(path)
+    if line is None:
+        return None
+    try:
+        return int(line.strip())
+    except ValueError:
+        return None
+
+
+def read_ip_iface_map() -> dict[str, str]:
+    """Map local IPs to interface names using iproute2 JSON output."""
+    stdout, stderr, code = run_command(["ip", "-j", "address", "show"], timeout=2)
+    if code != 0 or not stdout:
+        return {}
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(data, list):
+        return {}
+
+    mapping: dict[str, str] = {}
+
+    for link in data:
+        if not isinstance(link, dict):
+            continue
+        ifname = link.get("ifname")
+        if not ifname:
+            continue
+
+        addr_info = link.get("addr_info")
+        if not isinstance(addr_info, list):
+            continue
+
+        for addr in addr_info:
+            if not isinstance(addr, dict):
+                continue
+            local = addr.get("local")
+            if local:
+                mapping[str(local)] = str(ifname)
+
+    return mapping
+
+
+def get_ip_iface_map_cached(now: float) -> dict[str, str]:
+    global _ip_iface_cache
+    last_ts = float(_ip_iface_cache.get("timestamp") or 0.0)
+    if (now - last_ts) < IP_IFACE_CACHE_TTL_SECONDS and isinstance(_ip_iface_cache.get("map"), dict):
+        return _ip_iface_cache["map"]
+
+    mapping = read_ip_iface_map()
+    _ip_iface_cache = {
+        "timestamp": now,
+        "map": mapping,
+    }
+    return mapping
+
+
+def read_interface_metrics(iface: str) -> dict[str, Any] | None:
+    if not iface:
+        return None
+
+    base = os.path.join("/sys/class/net", iface)
+    operstate = _read_first_line(os.path.join(base, "operstate"))
+    mtu = _read_int(os.path.join(base, "mtu"))
+
+    rx_dropped = _read_int(os.path.join(base, "statistics", "rx_dropped"))
+    tx_dropped = _read_int(os.path.join(base, "statistics", "tx_dropped"))
+    rx_errors = _read_int(os.path.join(base, "statistics", "rx_errors"))
+    tx_errors = _read_int(os.path.join(base, "statistics", "tx_errors"))
+
+    iface_up: bool | None
+    if operstate == "up":
+        iface_up = True
+    elif operstate == "down":
+        iface_up = False
+    else:
+        iface_up = None
+
+    return {
+        "iface": iface,
+        "operstate": operstate,
+        "up": iface_up,
+        "mtu": mtu,
+        "rx_dropped": rx_dropped,
+        "tx_dropped": tx_dropped,
+        "rx_errors": rx_errors,
+        "tx_errors": tx_errors,
+    }
 
 
 def read_uptime_seconds() -> float | None:
@@ -473,8 +574,10 @@ def speed_collector_loop():
             combined_error = startup_error or error
 
         items = []
+        ip_iface_map = get_ip_iface_map_cached(started_at)
+        iface_metrics_cache: dict[str, dict[str, Any] | None] = {}
 
-        for wan_id, wan in WANS.items():
+        for wan_id, wan in sorted(WANS.items(), key=lambda kv: (kv[1].get("metric", 0), kv[0])):
             upload_total = counters.get(wan["upload_counter"], 0)
             download_total = counters.get(wan["download_counter"], 0)
 
@@ -497,12 +600,26 @@ def speed_collector_loop():
             with state_lock:
                 health = health_state.get(wan_id, {})
 
+            iface = ip_iface_map.get(wan.get("source_ip") or "")
+            if iface and iface not in iface_metrics_cache:
+                iface_metrics_cache[iface] = read_interface_metrics(iface)
+
+            iface_metrics = iface_metrics_cache.get(iface) if iface else None
+
             items.append({
                 "id": wan_id,
                 "name": wan["name"],
                 "source_ip": wan["source_ip"],
                 "gateway": wan["gateway"],
                 "metric": wan["metric"],
+                "iface": iface_metrics.get("iface") if iface_metrics else None,
+                "iface_state": iface_metrics.get("operstate") if iface_metrics else None,
+                "iface_up": iface_metrics.get("up") if iface_metrics else None,
+                "iface_mtu": iface_metrics.get("mtu") if iface_metrics else None,
+                "iface_rx_dropped": iface_metrics.get("rx_dropped") if iface_metrics else None,
+                "iface_tx_dropped": iface_metrics.get("tx_dropped") if iface_metrics else None,
+                "iface_rx_errors": iface_metrics.get("rx_errors") if iface_metrics else None,
+                "iface_tx_errors": iface_metrics.get("tx_errors") if iface_metrics else None,
                 "gateway_online": health.get("gateway_online"),
                 "internet_online": health.get("internet_online"),
                 "gateway_rtt_ms": health.get("gateway_rtt_ms"),
@@ -1061,6 +1178,8 @@ PAGE_HTML = """
     let lastRenderedSpeeds = {};
     let currentTab = "wan";
     let wanOrder = [];
+    let historyLoaded = false;
+    let historyLoadInProgress = false;
 
     const paletteVars = ["--blue", "--purple", "--green", "--yellow", "--red"];
     let cachedPalette = null;
@@ -1164,6 +1283,32 @@ PAGE_HTML = """
         setTimeout(() => box.innerText = "", 7000);
     }
 
+    async function loadHistoryOnce() {
+        if (historyLoaded || historyLoadInProgress) return;
+        historyLoadInProgress = true;
+
+        try {
+            const response = await fetch("/api/history?t=" + Date.now(), { cache: "no-store" });
+            const data = await response.json();
+
+            if (Array.isArray(data)) {
+                history.length = 0;
+                data.slice(-maxPoints).forEach(p => history.push(p));
+            }
+
+            historyLoaded = true;
+
+            if (currentTab === "wan") {
+                drawChart("downloadCanvas", "download_mbps");
+                drawChart("uploadCanvas", "upload_mbps");
+            }
+        } catch (e) {
+            // keep panel responsive even if history fetch fails
+        } finally {
+            historyLoadInProgress = false;
+        }
+    }
+
     async function loadStatus() {
         try {
             const response = await fetch("/api/status?t=" + Date.now(), { cache: "no-store" });
@@ -1189,14 +1334,35 @@ PAGE_HTML = """
         document.getElementById("lastUpdate").innerText =
             "Last update: " + new Date(data.timestamp * 1000).toLocaleString();
 
-        document.getElementById("defaultWan").innerText =
-            "Default WAN: " + (data.default_wan || "unknown");
+        const wansSorted = (data.wans || []).slice().sort((a, b) => {
+            const am = Number(a.metric ?? 0);
+            const bm = Number(b.metric ?? 0);
+            if (am !== bm) return am - bm;
+            return String(a.id || "").localeCompare(String(b.id || ""));
+        });
+        data.wans = wansSorted;
 
-        wanOrder = (data.wans || []).map(w => w.id);
+        const defId = data.default_wan || null;
+        let defText = defId || "unknown";
+        if (defId) {
+            const defWan = wansSorted.find(w => w.id === defId);
+            if (defWan && defWan.name) {
+                defText = defId + " - " + defWan.name;
+            }
+        }
+
+        document.getElementById("defaultWan").innerText =
+            "Default WAN: " + defText;
+
+        wanOrder = wansSorted.map(w => w.id);
 
         renderCards(data);
         renderSystem(data.system);
         pushHistory(data);
+
+        if (!historyLoaded) {
+            loadHistoryOnce();
+        }
 
         if (currentTab === "wan") {
             drawChart("downloadCanvas", "download_mbps");
@@ -1320,10 +1486,22 @@ PAGE_HTML = """
                 ? Math.max(0, Math.floor(Date.now() / 1000 - wan.health_last_checked))
                 : "-";
 
+            const ifaceText = (!wan.iface)
+                ? "-"
+                : (wan.iface_state ? `${wan.iface} (${String(wan.iface_state).toUpperCase()})` : wan.iface);
+
+            const ifStats = (wan.iface_rx_dropped === null || wan.iface_rx_dropped === undefined
+                || wan.iface_tx_dropped === null || wan.iface_tx_dropped === undefined
+                || wan.iface_rx_errors === null || wan.iface_rx_errors === undefined
+                || wan.iface_tx_errors === null || wan.iface_tx_errors === undefined)
+                ? "-"
+                : `Drop ${wan.iface_rx_dropped}/${wan.iface_tx_dropped} | Err ${wan.iface_rx_errors}/${wan.iface_tx_errors}`;
+
             div.innerHTML = `
                 <div class="wan-title">${wan.id} - ${wan.name}</div>
 
                 <div class="badges">
+                    ${statusBadge(wan.iface_up, "Link")}
                     ${statusBadge(wan.gateway_online, "Gateway")}
                     ${statusBadge(wan.internet_online, "Internet")}
                     <span class="badge ${isActive ? "active" : "standby"}">
@@ -1344,6 +1522,16 @@ PAGE_HTML = """
                 <div class="row">
                     <span>Metric</span>
                     <span class="value">${wan.metric}</span>
+                </div>
+
+                <div class="row">
+                    <span>Interface</span>
+                    <span class="value">${ifaceText}</span>
+                </div>
+
+                <div class="row">
+                    <span>IF Drop/Err (RX/TX)</span>
+                    <span class="value">${ifStats}</span>
                 </div>
 
                 <div class="speed-grid">
@@ -1379,6 +1567,11 @@ PAGE_HTML = """
                 </div>
 
                 <div class="row">
+                    <span>GW Jitter</span>
+                    <span class="value">${formatMs(wan.gateway_jitter_ms)}</span>
+                </div>
+
+                <div class="row">
                     <span>NET RTT / Loss</span>
                     <span class="value">${formatMs(wan.internet_rtt_ms)} / ${formatPct(wan.internet_loss_percent)}</span>
                 </div>
@@ -1392,7 +1585,11 @@ PAGE_HTML = """
     }
 
     function pushHistory(data) {
-        history.push(data);
+        if (history.length && history[history.length - 1].timestamp === data.timestamp) {
+            history[history.length - 1] = data;
+        } else {
+            history.push(data);
+        }
 
         if (history.length > maxPoints) {
             history.shift();

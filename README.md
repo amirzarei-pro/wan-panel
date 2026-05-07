@@ -5,9 +5,12 @@
 ## امکانات
 - نمایش سرعت هر WAN (Upload/Download) با استفاده از **nftables counter objects**
 - وضعیت Gateway/Internet + کیفیت لینک: **RTT / Loss / Jitter** (بدون پکیج اضافه)
+- نمایش وضعیت لینک (Interface up/down) و شمارنده‌های سادهٔ **drop/error** برای هر WAN
 - مانیتور منابع سیستم: CPU / RAM / Swap / Disk / Load / Uptime
 - UI تک صفحه‌ای با دو تب: `WAN / Panel` و `System Resources`
 - بدون CDN و بدون کتابخانهٔ JS خارجی
+
+> نمودارها بعد از Refresh هم با استفاده از `/api/history` پر می‌شوند.
 
 > این پروژه عمداً هیچ اکشن تغییر‌دهنده‌ای مثل Set Default Route ندارد.
 
