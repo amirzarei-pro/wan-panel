@@ -1022,6 +1022,9 @@ PAGE_HTML = """
         .message {
             color: var(--yellow);
             margin-top: 8px;
+            direction: rtl;
+            text-align: right;
+            unicode-bidi: plaintext;
         }
 
         .hint {
@@ -1079,6 +1082,32 @@ PAGE_HTML = """
             text-decoration: underline dotted var(--muted);
             text-underline-offset: 3px;
         }
+
+        .badge[data-help] {
+            cursor: help;
+        }
+
+        .tooltip {
+            position: fixed;
+            z-index: 9999;
+            display: none;
+            max-width: 380px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            background: var(--card2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-size: 13px;
+            line-height: 1.6;
+            direction: rtl;
+            text-align: right;
+            unicode-bidi: plaintext;
+            pointer-events: none;
+        }
+
+        .tooltip.show {
+            display: block;
+        }
     </style>
 </head>
 
@@ -1089,7 +1118,7 @@ PAGE_HTML = """
             <h1>WAN Live Panel</h1>
             <div class="subtitle" id="lastUpdate">Loading...</div>
             <div class="subtitle" id="defaultWan">Default WAN: -</div>
-            <div class="message" id="message"></div>
+            <div class="message" id="message" dir="rtl"></div>
         </div>
 
         <div class="actions">
@@ -1177,6 +1206,8 @@ PAGE_HTML = """
     </div>
 </div>
 
+<div id="tooltip" class="tooltip" dir="rtl"></div>
+
 <script>
     const history = [];
     const maxPoints = 90;
@@ -1189,20 +1220,21 @@ PAGE_HTML = """
     const hoveredCards = {};
 
     const HELP_FA = {
-        link: "وضعیت لینک اینترفیس (operstate). OK یعنی up.",
-        gateway: "نتیجه پینگ به Gateway از مبدا این WAN (با Source IP).",
-        internet: "نتیجه پینگ به اینترنت از مبدا این WAN. اولین IP پاسخ‌گو از لیست تست انتخاب می‌شود.",
-        default: "DEFAULT یعنی مسیر default فعلی سیستم روی همین WAN است.",
-        standby: "STANDBY یعنی الان default route روی این WAN نیست.",
-        sourceIp: "این IP برای bind کردن تست‌ها استفاده می‌شود (ping با گزینه -I).",
-        metric: "Metric کمتر یعنی اولویت بالاتر در انتخاب مسیر.",
-        iface: "نام اینترفیس از روی Source IP و خروجی ip address تشخیص داده می‌شود.",
-        ifStats: "Drop/Err شمارنده‌های تجمعی RX/TX از /sys/class/net/<iface>/statistics (از زمان boot).",
-        totals: "مجموع ترافیک خوانده‌شده از nftables counterها (تجمعی).",
-        healthCheck: "چند ثانیه از آخرین تست سلامت (gateway/internet) گذشته.",
-        rttLoss: "RTT = میانگین زمان پاسخ ping (ms). Loss = درصد پینگ‌های ناموفق در پنجرهٔ آخر.",
-        jitter: "Jitter = نوسان RTT (انحراف معیار) در پنجرهٔ آخر.",
-        target: "Target = IP تست اینترنتی که پاسخ داده.",
+        link: "وضعیت لینک اینترفیس (بالا/پایین بودن لینک).",
+        gateway: "دسترس‌پذیری گیت‌وی از مبدا همین لینک.",
+        internet: "دسترسی به اینترنت از مبدا همین لینک (اولین مقصد پاسخ‌گو انتخاب می‌شود).",
+        default: "یعنی مسیر پیش‌فرض فعلی سیستم روی همین لینک است.",
+        standby: "یعنی مسیر پیش‌فرض فعلی سیستم روی این لینک نیست.",
+        sourceIp: "آی‌پی مبدا تست‌ها (پینگ از همین آی‌پی ارسال می‌شود).",
+        metric: "عدد کمتر یعنی اولویت بالاتر برای مسیر.",
+        iface: "اینترفیس متناظر با آی‌پی مبدا.",
+        ifStats: "آمار افتادگی و خطا برای دریافت/ارسال اینترفیس (تجمعی از زمان روشن شدن سیستم).",
+        totals: "حجم کل ترافیک تجمعی خوانده‌شده از شمارنده‌ها.",
+        healthCheck: "زمان سپری‌شده از آخرین تست سلامت.",
+        rttLoss: "میانگین تاخیر و درصد عدم‌پاسخ در پنجرهٔ آخر.",
+        jitter: "نوسان تاخیر در پنجرهٔ آخر.",
+        target: "مقصد تست اینترنتی که پاسخ داده.",
+        jitterTarget: "نوسان تاخیر و مقصد تست اینترنتی پاسخ‌گو.",
     };
 
     const paletteVars = ["--blue", "--purple", "--green", "--yellow", "--red"];
@@ -1290,22 +1322,22 @@ PAGE_HTML = """
     }
 
     function statusBadge(value, label) {
-        let tip = "";
-        if (label === "Link") tip = HELP_FA.link;
-        else if (label === "Gateway") tip = HELP_FA.gateway;
-        else if (label === "Internet") tip = HELP_FA.internet;
+        let helpKey = "";
+        if (label === "Link") helpKey = "link";
+        else if (label === "Gateway") helpKey = "gateway";
+        else if (label === "Internet") helpKey = "internet";
 
-        const title = tip ? ` title="${tip}"` : "";
+        const helpAttr = helpKey ? ` data-help="${helpKey}"` : "";
 
         if (value === true) {
-            return `<span class="badge ok"${title}>${label} OK</span>`;
+            return `<span class="badge ok"${helpAttr}>${label} OK</span>`;
         }
 
         if (value === false) {
-            return `<span class="badge bad"${title}>${label} DOWN</span>`;
+            return `<span class="badge bad"${helpAttr}>${label} DOWN</span>`;
         }
 
-        return `<span class="badge unknown"${title}>${label} CHECKING</span>`;
+        return `<span class="badge unknown"${helpAttr}>${label} CHECKING</span>`;
     }
 
     function showMessage(text) {
@@ -1314,6 +1346,90 @@ PAGE_HTML = """
         setTimeout(() => box.innerText = "", 7000);
     }
 
+    // Custom tooltip (RTL) to avoid native title direction issues
+    const tooltipEl = document.getElementById("tooltip");
+    let activeTipEl = null;
+
+    function getHelpTextFromEl(el) {
+        if (!el) return null;
+        const key = el.getAttribute("data-help");
+        if (key && HELP_FA[key]) return HELP_FA[key];
+        return null;
+    }
+
+    function positionTooltip(clientX, clientY) {
+        if (!tooltipEl) return;
+        const pad = 12;
+        const offset = 14;
+
+        let x = clientX + offset;
+        let y = clientY + offset;
+
+        tooltipEl.style.left = x + "px";
+        tooltipEl.style.top = y + "px";
+
+        const rect = tooltipEl.getBoundingClientRect();
+
+        if (rect.right > window.innerWidth - pad) {
+            x = Math.max(pad, window.innerWidth - pad - rect.width);
+        }
+
+        if (rect.bottom > window.innerHeight - pad) {
+            y = Math.max(pad, window.innerHeight - pad - rect.height);
+        }
+
+        tooltipEl.style.left = x + "px";
+        tooltipEl.style.top = y + "px";
+    }
+
+    function showTooltip(text, clientX, clientY) {
+        if (!tooltipEl || !text) return;
+        tooltipEl.innerText = text;
+        tooltipEl.classList.add("show");
+        positionTooltip(clientX, clientY);
+    }
+
+    function hideTooltip() {
+        if (!tooltipEl) return;
+        tooltipEl.classList.remove("show");
+        activeTipEl = null;
+    }
+
+    function findHelpTarget(target) {
+        if (!target || !target.closest) return null;
+        return target.closest(".help, .badge");
+    }
+
+    document.addEventListener("mouseover", (ev) => {
+        const el = findHelpTarget(ev.target);
+        if (!el) return;
+
+        const tip = getHelpTextFromEl(el);
+        if (!tip) return;
+
+        activeTipEl = el;
+        showTooltip(tip, ev.clientX, ev.clientY);
+    });
+
+    document.addEventListener("mousemove", (ev) => {
+        if (!tooltipEl || !tooltipEl.classList.contains("show")) return;
+        positionTooltip(ev.clientX, ev.clientY);
+    });
+
+    document.addEventListener("mouseout", (ev) => {
+        const el = findHelpTarget(ev.target);
+        if (!el || el !== activeTipEl) return;
+
+        const toEl = ev.relatedTarget && ev.relatedTarget.closest
+            ? ev.relatedTarget.closest(".help, .badge")
+            : null;
+
+        if (toEl && toEl === activeTipEl) return;
+        hideTooltip();
+    });
+
+    window.addEventListener("scroll", hideTooltip, { passive: true });
+
     // Click/tap fallback for devices without hover
     document.addEventListener("click", (ev) => {
         const el = ev.target && ev.target.closest
@@ -1321,7 +1437,8 @@ PAGE_HTML = """
             : null;
 
         if (!el) return;
-        const tip = el.getAttribute("title");
+        const key = el.getAttribute("data-help");
+        const tip = (key && HELP_FA[key]) ? HELP_FA[key] : null;
         if (tip) {
             showMessage(tip);
         }
@@ -1555,8 +1672,6 @@ PAGE_HTML = """
                 ? "-"
                 : `Drop ${wan.iface_rx_dropped}/${wan.iface_tx_dropped} | Err ${wan.iface_rx_errors}/${wan.iface_tx_errors}`;
 
-            const defaultTip = isActive ? HELP_FA.default : HELP_FA.standby;
-
             div.innerHTML = `
                 <div class="wan-title">${wan.id} - ${wan.name}</div>
 
@@ -1564,33 +1679,33 @@ PAGE_HTML = """
                     ${statusBadge(wan.iface_up, "Link")}
                     ${statusBadge(wan.gateway_online, "Gateway")}
                     ${statusBadge(wan.internet_online, "Internet")}
-                    <span class="badge ${isActive ? "active" : "standby"}" title="${defaultTip}">
+                    <span class="badge ${isActive ? "active" : "standby"}" data-help="${isActive ? "default" : "standby"}">
                         ${isActive ? "DEFAULT" : "STANDBY"}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.sourceIp}">Source IP</span>
+                    <span class="help" data-help="sourceIp">Source IP</span>
                     <span class="value">${wan.source_ip}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.gateway}">Gateway</span>
+                    <span class="help" data-help="gateway">Gateway</span>
                     <span class="value">${wan.gateway}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.metric}">Metric</span>
+                    <span class="help" data-help="metric">Metric</span>
                     <span class="value">${wan.metric}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.iface}">Interface</span>
+                    <span class="help" data-help="iface">Interface</span>
                     <span class="value">${ifaceText}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.ifStats}">IF Drop/Err (RX/TX)</span>
+                    <span class="help" data-help="ifStats">IF Drop/Err (RX/TX)</span>
                     <span class="value">${ifStats}</span>
                 </div>
 
@@ -1607,37 +1722,37 @@ PAGE_HTML = """
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.totals}">Total Download</span>
+                    <span class="help" data-help="totals">Total Download</span>
                     <span class="value">${formatBytes(wan.download_total)}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.totals}">Total Upload</span>
+                    <span class="help" data-help="totals">Total Upload</span>
                     <span class="value">${formatBytes(wan.upload_total)}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.healthCheck}">Health Check</span>
+                    <span class="help" data-help="healthCheck">Health Check</span>
                     <span class="value">${checkedAgo}s ago</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.rttLoss}">GW RTT / Loss</span>
+                    <span class="help" data-help="rttLoss">GW RTT / Loss</span>
                     <span class="value">${formatMs(wan.gateway_rtt_ms)} / ${formatPct(wan.gateway_loss_percent)}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.jitter}">GW Jitter</span>
+                    <span class="help" data-help="jitter">GW Jitter</span>
                     <span class="value">${formatMs(wan.gateway_jitter_ms)}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.rttLoss}">NET RTT / Loss</span>
+                    <span class="help" data-help="rttLoss">NET RTT / Loss</span>
                     <span class="value">${formatMs(wan.internet_rtt_ms)} / ${formatPct(wan.internet_loss_percent)}</span>
                 </div>
 
                 <div class="row">
-                    <span class="help" title="${HELP_FA.jitter} ${HELP_FA.target}">NET Jitter / Target</span>
+                    <span class="help" data-help="jitterTarget">NET Jitter / Target</span>
                     <span class="value">${formatMs(wan.internet_jitter_ms)} / ${(wan.internet_target || "-")}</span>
                 </div>
             `;
