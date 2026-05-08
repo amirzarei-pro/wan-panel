@@ -417,6 +417,9 @@ last_state_flush = 0.0
 
 PING_RTT_RE = re.compile(r"time[=<]([0-9]+(?:\.[0-9]+)?)\s*ms")
 
+NEIGH_OK_STATES = {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"}
+NEIGH_BAD_STATES = {"FAILED", "INCOMPLETE"}
+
 
 def ping_once(ip: str, timeout: int = 1, source_ip: str | None = None) -> tuple[bool, float | None]:
     args = ["ping", "-n", "-c", "1", "-W", str(timeout)]
@@ -437,6 +440,55 @@ def ping_once(ip: str, timeout: int = 1, source_ip: str | None = None) -> tuple[
         return True, float(match.group(1))
     except ValueError:
         return True, None
+
+
+def read_neighbor_state(ip: str, iface: str | None = None) -> str | None:
+    if not ip:
+        return None
+
+    args = ["ip", "-j", "neigh", "show", "to", ip]
+    if iface:
+        args.extend(["dev", iface])
+
+    stdout, _, code = run_command(args, timeout=1.2)
+    if code != 0 or not stdout:
+        return None
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(data, list):
+        return None
+
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("dst") or "") != ip:
+            continue
+        state = entry.get("state")
+        if isinstance(state, list):
+            state = " ".join(str(s) for s in state)
+        return str(state) if state else None
+
+    return None
+
+
+def is_neighbor_reachable(ip: str, iface: str | None = None) -> tuple[bool | None, str | None]:
+    state = read_neighbor_state(ip, iface)
+    if not state:
+        return None, None
+
+    tokens = [t for t in re.split(r"[,\s]+", state.upper()) if t]
+
+    if any(t in NEIGH_BAD_STATES for t in tokens):
+        return False, state
+
+    if any(t in NEIGH_OK_STATES for t in tokens):
+        return True, state
+
+    return None, state
 
 
 def compute_loss_percent(success_window: deque) -> float | None:
@@ -854,6 +906,8 @@ def speed_collector_loop():
 
 def health_collector_loop():
     while True:
+        loop_started = time.time()
+        ip_iface_map = get_ip_iface_map_cached(loop_started)
         for wan_id, wan in WANS.items():
             now = int(time.time())
 
@@ -867,11 +921,19 @@ def health_collector_loop():
                 }
                 quality_samples[wan_id] = samples
 
+            iface = ip_iface_map.get(wan.get("source_ip") or "")
+
             gateway_online, gateway_rtt_ms = ping_once(
                 wan.get("gateway", ""),
                 timeout=1,
                 source_ip=wan.get("source_ip") or None,
             )
+
+            if not gateway_online:
+                neigh_ok, _ = is_neighbor_reachable(wan.get("gateway", ""), iface)
+                if neigh_ok is True:
+                    gateway_online = True
+                    gateway_rtt_ms = None
 
             samples["gateway_success"].append(gateway_online)
             samples["gateway_rtt"].append(gateway_rtt_ms)
@@ -1408,7 +1470,7 @@ PAGE_HTML = """
 
     const HELP_FA = {
         link: "وضعیت لینک اینترفیس (بالا/پایین بودن لینک).",
-        gateway: "دسترس‌پذیری گیت‌وی از مبدا همین لینک.",
+        gateway: "دسترس‌پذیری گیت‌وی از مبدا همین لینک (ICMP یا وضعیت neighbor/ARP).",
         internet: "دسترسی به اینترنت از مبدا همین لینک (اولین مقصد پاسخ‌گو انتخاب می‌شود).",
         default: "یعنی مسیر پیش‌فرض فعلی سیستم روی همین لینک است.",
         standby: "یعنی مسیر پیش‌فرض فعلی سیستم روی این لینک نیست.",
