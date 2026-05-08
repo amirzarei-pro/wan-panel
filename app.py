@@ -148,7 +148,12 @@ NFT_TABLE_NAME = str(CONFIG.get("nft_table_name") or "wanmon")
 
 WANS: dict[str, dict[str, Any]] = CONFIG.get("wans") or {}
 
+STATE_PATH = os.environ.get("WAN_PANEL_STATE") or os.path.join(BASE_DIR, "wan-panel-state.json")
+STATE_VERSION = 1
+STATE_FLUSH_INTERVAL_SECONDS = 5.0
+
 state_lock = threading.Lock()
+state_file_lock = threading.Lock()
 
 last_counter_values = {}
 
@@ -243,6 +248,171 @@ def read_nft_counters():
             counters[name] = int(bytes_count)
 
     return counters, None
+
+
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_persistent_state(path: str, wans: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "version": STATE_VERSION,
+        "updated_at": 0,
+        "wans": {},
+    }
+
+    data: dict[str, Any] | None = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    data = raw
+        except (OSError, json.JSONDecodeError):
+            data = None
+
+    data_wans = {}
+    if isinstance(data, dict):
+        data_wans = data.get("wans") if isinstance(data.get("wans"), dict) else {}
+        base["updated_at"] = _safe_int(data.get("updated_at")) or 0
+
+    for wan_id in wans.keys():
+        entry = data_wans.get(wan_id, {}) if isinstance(data_wans, dict) else {}
+        if not isinstance(entry, dict):
+            entry = {}
+
+        base["wans"][wan_id] = {
+            "download_total_bytes": _safe_int(entry.get("download_total_bytes")),
+            "upload_total_bytes": _safe_int(entry.get("upload_total_bytes")),
+            "last_nft_download_bytes": _safe_int(entry.get("last_nft_download_bytes")),
+            "last_nft_upload_bytes": _safe_int(entry.get("last_nft_upload_bytes")),
+            "last_seen_at": _safe_int(entry.get("last_seen_at")),
+            "seeded_at": _safe_int(entry.get("seeded_at")),
+        }
+
+    return base
+
+
+def _update_total_for_direction(
+    entry: dict[str, Any],
+    current_raw: int | None,
+    now: int,
+    last_key: str,
+    total_key: str,
+):
+    if current_raw is None:
+        if entry.get(total_key) is None:
+            entry[total_key] = 0
+        return
+
+    current_raw = int(current_raw)
+    last = _safe_int(entry.get(last_key))
+    total = _safe_int(entry.get(total_key)) or 0
+
+    if last is None:
+        if total == 0:
+            total = current_raw
+            if not entry.get("seeded_at"):
+                entry["seeded_at"] = now
+    else:
+        delta = current_raw - last
+        if delta < 0:
+            delta = current_raw
+        if delta > 0:
+            total += delta
+
+    entry[last_key] = current_raw
+    entry[total_key] = total
+
+
+def update_persistent_totals(
+    wan_id: str,
+    upload_raw: int | None,
+    download_raw: int | None,
+    now: int,
+):
+    global state_dirty
+
+    with state_file_lock:
+        entry = persistent_state["wans"].get(wan_id)
+        if not isinstance(entry, dict):
+            entry = {
+                "download_total_bytes": None,
+                "upload_total_bytes": None,
+                "last_nft_download_bytes": None,
+                "last_nft_upload_bytes": None,
+                "last_seen_at": None,
+                "seeded_at": None,
+            }
+            persistent_state["wans"][wan_id] = entry
+
+        _update_total_for_direction(entry, upload_raw, now, "last_nft_upload_bytes", "upload_total_bytes")
+        _update_total_for_direction(entry, download_raw, now, "last_nft_download_bytes", "download_total_bytes")
+
+        if upload_raw is not None or download_raw is not None:
+            entry["last_seen_at"] = now
+        elif entry.get("last_seen_at") is None:
+            entry["last_seen_at"] = now
+
+        persistent_state["updated_at"] = now
+        state_dirty = True
+
+        return dict(entry)
+
+
+def get_persistent_wan_state(wan_id: str) -> dict[str, Any]:
+    with state_file_lock:
+        entry = persistent_state["wans"].get(wan_id)
+        if not isinstance(entry, dict):
+            return {
+                "download_total_bytes": 0,
+                "upload_total_bytes": 0,
+            }
+        return dict(entry)
+
+
+def flush_persistent_state_if_needed(now: float):
+    global last_state_flush
+    global state_dirty
+
+    if (now - last_state_flush) < STATE_FLUSH_INTERVAL_SECONDS:
+        return
+
+    with state_file_lock:
+        if not state_dirty:
+            return
+        if (now - last_state_flush) < STATE_FLUSH_INTERVAL_SECONDS:
+            return
+
+        data = {
+            "version": STATE_VERSION,
+            "updated_at": int(now),
+            "wans": persistent_state["wans"],
+        }
+
+        tmp_path = f"{STATE_PATH}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=True, indent=2, sort_keys=True)
+            os.replace(tmp_path, STATE_PATH)
+            last_state_flush = now
+            state_dirty = False
+        except OSError:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+persistent_state = load_persistent_state(STATE_PATH, WANS)
+state_dirty = False
+last_state_flush = 0.0
 
 
 PING_RTT_RE = re.compile(r"time[=<]([0-9]+(?:\.[0-9]+)?)\s*ms")
@@ -566,6 +736,7 @@ def speed_collector_loop():
 
         counters, error = read_nft_counters()
         default_wan = get_default_wan()
+        counters_ok = error is None
 
         combined_error = None
         if startup_error and error:
@@ -578,8 +749,24 @@ def speed_collector_loop():
         iface_metrics_cache: dict[str, dict[str, Any] | None] = {}
 
         for wan_id, wan in sorted(WANS.items(), key=lambda kv: (kv[1].get("metric", 0), kv[0])):
-            upload_total = counters.get(wan["upload_counter"], 0)
-            download_total = counters.get(wan["download_counter"], 0)
+            upload_raw = counters.get(wan["upload_counter"], 0)
+            download_raw = counters.get(wan["download_counter"], 0)
+
+            upload_present = wan["upload_counter"] in counters
+            download_present = wan["download_counter"] in counters
+
+            if counters_ok:
+                state_entry = update_persistent_totals(
+                    wan_id,
+                    upload_raw if upload_present else None,
+                    download_raw if download_present else None,
+                    int(started_at),
+                )
+            else:
+                state_entry = get_persistent_wan_state(wan_id)
+
+            upload_total = int(state_entry.get("upload_total_bytes") or 0)
+            download_total = int(state_entry.get("download_total_bytes") or 0)
 
             upload_bps = 0.0
             download_bps = 0.0
@@ -588,13 +775,13 @@ def speed_collector_loop():
                 last = last_counter_values[wan_id]
                 elapsed = max(started_at - last["timestamp"], 0.2)
 
-                upload_bps = max(upload_total - last["upload_total"], 0) / elapsed
-                download_bps = max(download_total - last["download_total"], 0) / elapsed
+                upload_bps = max(upload_raw - last["upload_total"], 0) / elapsed
+                download_bps = max(download_raw - last["download_total"], 0) / elapsed
 
             last_counter_values[wan_id] = {
                 "timestamp": started_at,
-                "upload_total": upload_total,
-                "download_total": download_total,
+                "upload_total": upload_raw,
+                "download_total": download_raw,
             }
 
             with state_lock:
@@ -661,6 +848,7 @@ def speed_collector_loop():
 
         elapsed = time.time() - started_at
         sleep_for = max(SPEED_INTERVAL_SECONDS - elapsed, 0.05)
+        flush_persistent_state_if_needed(time.time())
         time.sleep(sleep_for)
 
 

@@ -1,0 +1,46 @@
+{
+  "updated_at": 1778195125,
+  "version": 1,
+  "wans": {
+    "wan10": {
+      "download_total_bytes": 659752292,
+      "last_nft_download_bytes": 659752292,
+      "last_nft_upload_bytes": 63403243,
+      "last_seen_at": 1778195125,
+      "seeded_at": 1778194890,
+      "upload_total_bytes": 63403243
+    },
+    "wan20": {
+      "download_total_bytes": 227748472,
+      "last_nft_download_bytes": 227748472,
+      "last_nft_upload_bytes": 23403814,
+      "last_seen_at": 1778195124,
+      "seeded_at": 1778194890,
+      "upload_total_bytes": 23403814
+    },
+    "wan50": {
+      "download_total_bytes": 27761914,
+      "last_nft_download_bytes": 27761914,
+      "last_nft_upload_bytes": 344348457,
+      "last_seen_at": 1778195124,
+      "seeded_at": 1778194890,
+      "upload_total_bytes": 344348457
+    },
+    "wan60": {
+      "download_total_bytes": 24673146,
+      "last_nft_download_bytes": 24673146,
+      "last_nft_upload_bytes": 305748904,
+      "last_seen_at": 1778195124,
+      "seeded_at": 1778194890,
+      "upload_total_bytes": 305748904
+    },
+    "wan70": {
+      "download_total_bytes": 24849459,
+      "last_nft_download_bytes": 24849459,
+      "last_nft_upload_bytes": 225498487,
+      "last_seen_at": 1778195124,
+      "seeded_at": 1778194890,
+      "upload_total_bytes": 225498487
+    }
+  }
+}
