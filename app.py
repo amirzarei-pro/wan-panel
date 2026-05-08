@@ -12,7 +12,7 @@ import time
 from collections import deque
 from typing import Any, Sequence
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
@@ -142,6 +142,15 @@ HEALTH_INTERVAL_SECONDS = float(CONFIG.get("health_interval_seconds") or 5.0)
 HISTORY_LIMIT = int(CONFIG.get("history_limit") or 120)
 
 QUALITY_WINDOW = int(CONFIG.get("quality_window") or 20)
+
+ALLOWED_HEALTH_INTERVAL_SECONDS = {5, 20, 40, 60}
+
+runtime_settings_lock = threading.Lock()
+runtime_settings = {
+    "health_enabled": True,
+    "health_interval_seconds": HEALTH_INTERVAL_SECONDS,
+}
+runtime_settings_event = threading.Event()
 
 INTERNET_TEST_GLOBAL_TARGETS = CONFIG.get("internet_test_targets_global")
 if not isinstance(INTERNET_TEST_GLOBAL_TARGETS, list) or not INTERNET_TEST_GLOBAL_TARGETS:
@@ -1018,6 +1027,15 @@ def speed_collector_loop():
 
 def health_collector_loop():
     while True:
+        with runtime_settings_lock:
+            health_enabled = bool(runtime_settings.get("health_enabled"))
+            health_interval_seconds = float(runtime_settings.get("health_interval_seconds") or HEALTH_INTERVAL_SECONDS)
+
+        if not health_enabled:
+            runtime_settings_event.wait(timeout=1.0)
+            runtime_settings_event.clear()
+            continue
+
         loop_started = time.time()
         ip_iface_map = get_ip_iface_map_cached(loop_started)
         for wan_id, wan in WANS.items():
@@ -1128,7 +1146,8 @@ def health_collector_loop():
             # small gap so health checks do not spike the server
             time.sleep(0.1)
 
-        time.sleep(HEALTH_INTERVAL_SECONDS)
+        runtime_settings_event.wait(timeout=max(health_interval_seconds, 0.2))
+        runtime_settings_event.clear()
 
 
 @app.route("/")
@@ -1153,6 +1172,58 @@ def api_routes():
     return jsonify({
         "output": read_routes()
     })
+
+
+@app.route("/api/runtime", methods=["GET", "POST"])
+def api_runtime():
+    def _snapshot():
+        with runtime_settings_lock:
+            enabled = bool(runtime_settings.get("health_enabled"))
+            interval = float(runtime_settings.get("health_interval_seconds") or HEALTH_INTERVAL_SECONDS)
+        return {
+            "health_enabled": enabled,
+            "health_interval_seconds": (0 if not enabled else int(round(interval))),
+        }
+
+    if request.method == "GET":
+        return jsonify(_snapshot())
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
+
+    enabled: bool | None = None
+    interval_seconds: int | None = None
+
+    if "health_interval_seconds" in data:
+        try:
+            interval_seconds = int(data.get("health_interval_seconds"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "health_interval_seconds must be an integer"}), 400
+
+        if interval_seconds == 0:
+            enabled = False
+            interval_seconds = None
+        elif interval_seconds not in ALLOWED_HEALTH_INTERVAL_SECONDS:
+            allowed = ", ".join(str(x) for x in sorted(ALLOWED_HEALTH_INTERVAL_SECONDS))
+            return jsonify({"error": f"health_interval_seconds must be one of: 0, {allowed}"}), 400
+        else:
+            enabled = True
+
+    if "health_enabled" in data:
+        enabled = bool(data.get("health_enabled"))
+
+    if enabled is None and interval_seconds is None:
+        return jsonify(_snapshot())
+
+    with runtime_settings_lock:
+        if enabled is not None:
+            runtime_settings["health_enabled"] = enabled
+        if interval_seconds is not None:
+            runtime_settings["health_interval_seconds"] = float(interval_seconds)
+
+    runtime_settings_event.set()
+    return jsonify(_snapshot())
 
 
 PAGE_HTML = """
@@ -1226,6 +1297,13 @@ PAGE_HTML = """
             align-items: center;
         }
 
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
         .section-head {
             display: flex;
             justify-content: space-between;
@@ -1242,6 +1320,12 @@ PAGE_HTML = """
             background: #2563eb;
             color: #fff;
             font-weight: bold;
+        }
+
+        button.icon-btn {
+            min-width: 44px;
+            line-height: 1;
+            font-size: 18px;
         }
 
         button.tab {
@@ -1504,6 +1588,49 @@ PAGE_HTML = """
         .tooltip.show {
             display: block;
         }
+
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 10000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 18px;
+            background: rgba(15, 23, 42, 0.86);
+        }
+
+        .modal-card {
+            width: min(560px, 100%);
+            direction: rtl;
+            text-align: right;
+            unicode-bidi: plaintext;
+        }
+
+        .modal-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        select.select {
+            background: var(--card2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 10px;
+            padding: 8px 10px;
+            outline: none;
+        }
     </style>
 </head>
 
@@ -1521,6 +1648,11 @@ PAGE_HTML = """
             <div class="tabs">
                 <button class="tab active" id="tabBtnWan" onclick="setTab('wan')">WAN / Panel</button>
                 <button class="tab" id="tabBtnSystem" onclick="setTab('system')">System Resources</button>
+            </div>
+
+            <div class="toolbar">
+                <button class="gray icon-btn" id="btnManualRefresh" onclick="manualRefresh()" aria-label="Manual Refresh">⟳</button>
+                <button class="gray icon-btn" id="btnSettings" onclick="openSettings()" aria-label="Settings">⚙</button>
             </div>
         </div>
     </div>
@@ -1598,6 +1730,42 @@ PAGE_HTML = """
                 </div>
                 <div class="mini">Updates with the 1s status refresh.</div>
             </div>
+        </div>
+    </div>
+</div>
+
+<div id="settingsOverlay" class="modal-overlay hidden" onclick="closeSettings()">
+    <div class="card modal-card" onclick="event.stopPropagation()">
+        <div class="modal-head">
+            <div class="wan-title">تنظیمات</div>
+            <button class="gray icon-btn" onclick="closeSettings()" aria-label="Close">✕</button>
+        </div>
+
+        <div class="row">
+            <span>رفرش ترافیک</span>
+            <select id="selTrafficRefresh" class="select">
+                <option value="1">1s</option>
+                <option value="5">5s</option>
+                <option value="10">10s</option>
+                <option value="20">20s</option>
+                <option value="0">خاموش</option>
+            </select>
+        </div>
+
+        <div class="row">
+            <span>چک سلامت (Gateway/Internet)</span>
+            <select id="selHealthCheck" class="select">
+                <option value="5">5s</option>
+                <option value="20">20s</option>
+                <option value="40">40s</option>
+                <option value="60">60s</option>
+                <option value="0">خاموش</option>
+            </select>
+        </div>
+
+        <div class="modal-actions">
+            <button class="red" onclick="disableBoth();">خاموش کردن هر دو</button>
+            <button class="gray" onclick="closeSettings()">بستن</button>
         </div>
     </div>
 </div>
@@ -2277,8 +2445,176 @@ PAGE_HTML = """
         }
     }
 
+    // --- Refresh + Settings ---
+    const LS_TRAFFIC_REFRESH_KEY = "wanPanelTrafficRefreshSeconds";
+    const LS_HEALTH_CHECK_KEY = "wanPanelHealthCheckSeconds";
+
+    const TRAFFIC_REFRESH_OPTIONS = [0, 1, 5, 10, 20];
+    const HEALTH_CHECK_OPTIONS = [0, 5, 20, 40, 60];
+
+    let trafficRefreshSeconds = 1;
+    let healthCheckSeconds = 5;
+    let statusTimerId = null;
+
+    function parseStoredInt(key, fallback) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw === null || raw === undefined) return fallback;
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return fallback;
+            return Math.floor(n);
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    function stopStatusAutoRefresh() {
+        if (statusTimerId !== null) {
+            clearInterval(statusTimerId);
+            statusTimerId = null;
+        }
+    }
+
+    function startStatusAutoRefresh() {
+        stopStatusAutoRefresh();
+        if (trafficRefreshSeconds > 0) {
+            statusTimerId = setInterval(loadStatus, trafficRefreshSeconds * 1000);
+        }
+    }
+
+    function applyTrafficRefresh(seconds, save) {
+        const s = Number(seconds);
+        const val = Number.isFinite(s) ? Math.floor(s) : 1;
+        if (!TRAFFIC_REFRESH_OPTIONS.includes(val)) return;
+
+        trafficRefreshSeconds = val;
+        if (save !== false) {
+            localStorage.setItem(LS_TRAFFIC_REFRESH_KEY, String(val));
+        }
+
+        startStatusAutoRefresh();
+
+        // Give immediate feedback when user changes refresh interval.
+        if (save !== false && val > 0) {
+            loadStatus();
+        }
+    }
+
+    async function applyHealthCheck(seconds, save) {
+        const s = Number(seconds);
+        const val = Number.isFinite(s) ? Math.floor(s) : 5;
+        if (!HEALTH_CHECK_OPTIONS.includes(val)) return;
+
+        if (save !== false) {
+            localStorage.setItem(LS_HEALTH_CHECK_KEY, String(val));
+        }
+
+        try {
+            const response = await fetch("/api/runtime", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ health_interval_seconds: val }),
+            });
+
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data && data.error ? data.error : ("HTTP " + response.status));
+            }
+
+            healthCheckSeconds = Number(data.health_interval_seconds ?? val);
+        } catch (e) {
+            showMessage("خطا در تنظیم چک سلامت: " + e);
+        }
+    }
+
+    function syncSettingsUI() {
+        const trafficSel = document.getElementById("selTrafficRefresh");
+        if (trafficSel) trafficSel.value = String(trafficRefreshSeconds);
+
+        const healthSel = document.getElementById("selHealthCheck");
+        if (healthSel) healthSel.value = String(healthCheckSeconds);
+    }
+
+    function openSettings() {
+        const overlay = document.getElementById("settingsOverlay");
+        if (!overlay) return;
+        syncSettingsUI();
+        overlay.classList.remove("hidden");
+    }
+
+    function closeSettings() {
+        const overlay = document.getElementById("settingsOverlay");
+        if (!overlay) return;
+        overlay.classList.add("hidden");
+    }
+
+    function disableBoth() {
+        applyTrafficRefresh(0, true);
+        applyHealthCheck(0, true);
+
+        const trafficSel = document.getElementById("selTrafficRefresh");
+        if (trafficSel) trafficSel.value = "0";
+
+        const healthSel = document.getElementById("selHealthCheck");
+        if (healthSel) healthSel.value = "0";
+    }
+
+    function manualRefresh() {
+        loadStatus();
+    }
+
+    document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") {
+            closeSettings();
+        }
+    });
+
+    async function initSettings() {
+        const storedTraffic = parseStoredInt(LS_TRAFFIC_REFRESH_KEY, 1);
+        trafficRefreshSeconds = TRAFFIC_REFRESH_OPTIONS.includes(storedTraffic) ? storedTraffic : 1;
+        applyTrafficRefresh(trafficRefreshSeconds, false);
+
+        const trafficSel = document.getElementById("selTrafficRefresh");
+        if (trafficSel) {
+            trafficSel.value = String(trafficRefreshSeconds);
+            trafficSel.addEventListener("change", () => {
+                applyTrafficRefresh(trafficSel.value, true);
+            });
+        }
+
+        let backendHealth = 5;
+        try {
+            const resp = await fetch("/api/runtime?t=" + Date.now(), { cache: "no-store" });
+            const rt = await resp.json();
+            const n = Number(rt && rt.health_interval_seconds);
+            if (Number.isFinite(n) && HEALTH_CHECK_OPTIONS.includes(Math.floor(n))) {
+                backendHealth = Math.floor(n);
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        const storedHealth = parseStoredInt(LS_HEALTH_CHECK_KEY, null);
+        const desiredHealth = HEALTH_CHECK_OPTIONS.includes(storedHealth) ? storedHealth : backendHealth;
+
+        healthCheckSeconds = desiredHealth;
+        const healthSel = document.getElementById("selHealthCheck");
+        if (healthSel) {
+            healthSel.value = String(healthCheckSeconds);
+            healthSel.addEventListener("change", () => {
+                applyHealthCheck(healthSel.value, true);
+            });
+        }
+
+        if (HEALTH_CHECK_OPTIONS.includes(storedHealth) && storedHealth !== backendHealth) {
+            await applyHealthCheck(storedHealth, false);
+            syncSettingsUI();
+        }
+    }
+
     loadStatus();
-    setInterval(loadStatus, 1000);
+    initSettings();
+    startStatusAutoRefresh();
 
     // default tab
     setTab("wan");
