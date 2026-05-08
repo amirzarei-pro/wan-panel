@@ -151,6 +151,7 @@ runtime_settings = {
     "health_interval_seconds": HEALTH_INTERVAL_SECONDS,
 }
 runtime_settings_event = threading.Event()
+health_force_once = threading.Event()
 
 INTERNET_TEST_GLOBAL_TARGETS = CONFIG.get("internet_test_targets_global")
 if not isinstance(INTERNET_TEST_GLOBAL_TARGETS, list) or not INTERNET_TEST_GLOBAL_TARGETS:
@@ -1027,11 +1028,16 @@ def speed_collector_loop():
 
 def health_collector_loop():
     while True:
+        forced_run = False
+        if health_force_once.is_set():
+            forced_run = True
+            health_force_once.clear()
+
         with runtime_settings_lock:
             health_enabled = bool(runtime_settings.get("health_enabled"))
             health_interval_seconds = float(runtime_settings.get("health_interval_seconds") or HEALTH_INTERVAL_SECONDS)
 
-        if not health_enabled:
+        if not health_enabled and not forced_run:
             runtime_settings_event.wait(timeout=1.0)
             runtime_settings_event.clear()
             continue
@@ -1146,6 +1152,9 @@ def health_collector_loop():
             # small gap so health checks do not spike the server
             time.sleep(0.1)
 
+        if not health_enabled:
+            continue
+
         runtime_settings_event.wait(timeout=max(health_interval_seconds, 0.2))
         runtime_settings_event.clear()
 
@@ -1224,6 +1233,13 @@ def api_runtime():
 
     runtime_settings_event.set()
     return jsonify(_snapshot())
+
+
+@app.route("/api/health/trigger", methods=["POST"])
+def api_health_trigger():
+    health_force_once.set()
+    runtime_settings_event.set()
+    return jsonify({"ok": True})
 
 
 PAGE_HTML = """
