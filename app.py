@@ -1600,6 +1600,10 @@ PAGE_HTML = """
             background: rgba(15, 23, 42, 0.86);
         }
 
+        .modal-overlay.hidden {
+            display: none;
+        }
+
         .modal-card {
             width: min(560px, 100%);
             direction: rtl;
