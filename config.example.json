@@ -6,6 +6,7 @@
   "history_limit": 120,
   "quality_window": 20,
   "internet_test_ips": ["1.1.1.1", "8.8.8.8"],
+  "internet_test_targets_ir": ["snapp.ir"],
   "nft_table_family": "inet",
   "nft_table_name": "wanmon",
   "wans": {

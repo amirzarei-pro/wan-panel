@@ -40,7 +40,9 @@ python3 app.py
 کلیدهای مهم:
 - `bind_host`, `port`
 - `wans`: آبجکت شامل WANها (کلید = `wan_id`)
-- `internet_test_ips`: لیست IP برای تست اینترنت (اولین مقصدی که پاسخ بده استفاده می‌شود)
+- `internet_test_targets_global`: لیست مقصد برای تست اینترنت جهانی (IP یا دامنه) — اگر ست نشود از `internet_test_ips` استفاده می‌شود
+- `internet_test_targets_ir`: لیست مقصد برای تست اینترنت/سرویس داخل ایران (IP یا دامنه)
+- `internet_test_ips`: (قدیمی) لیست IP برای تست اینترنت جهانی (fallback)
 - `nft_table_family`, `nft_table_name`: جدول nft که counterها در آن هستند
 
 ## nftables counters

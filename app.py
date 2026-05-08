@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import statistics
 import subprocess
 import threading
@@ -26,6 +27,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "history_limit": 120,
     "quality_window": 20,
     "internet_test_ips": ["1.1.1.1", "8.8.8.8"],
+    "internet_test_targets_global": None,
+    "internet_test_targets_ir": None,
     "nft_table_family": "inet",
     "nft_table_name": "wanmon",
     "wans": {},
@@ -74,6 +77,8 @@ def load_config(path: str) -> tuple[dict[str, Any], str | None]:
         "history_limit",
         "quality_window",
         "internet_test_ips",
+        "internet_test_targets_global",
+        "internet_test_targets_ir",
         "nft_table_family",
         "nft_table_name",
     ):
@@ -138,10 +143,19 @@ HISTORY_LIMIT = int(CONFIG.get("history_limit") or 120)
 
 QUALITY_WINDOW = int(CONFIG.get("quality_window") or 20)
 
-INTERNET_TEST_IPS = CONFIG.get("internet_test_ips")
-if not isinstance(INTERNET_TEST_IPS, list) or not INTERNET_TEST_IPS:
-    INTERNET_TEST_IPS = ["1.1.1.1", "8.8.8.8"]
-INTERNET_TEST_IPS = [str(x) for x in INTERNET_TEST_IPS]
+INTERNET_TEST_GLOBAL_TARGETS = CONFIG.get("internet_test_targets_global")
+if not isinstance(INTERNET_TEST_GLOBAL_TARGETS, list) or not INTERNET_TEST_GLOBAL_TARGETS:
+    INTERNET_TEST_GLOBAL_TARGETS = CONFIG.get("internet_test_ips")
+if not isinstance(INTERNET_TEST_GLOBAL_TARGETS, list) or not INTERNET_TEST_GLOBAL_TARGETS:
+    INTERNET_TEST_GLOBAL_TARGETS = ["1.1.1.1", "8.8.8.8"]
+INTERNET_TEST_GLOBAL_TARGETS = [str(x).strip() for x in INTERNET_TEST_GLOBAL_TARGETS if str(x).strip()]
+if not INTERNET_TEST_GLOBAL_TARGETS:
+    INTERNET_TEST_GLOBAL_TARGETS = ["1.1.1.1", "8.8.8.8"]
+
+INTERNET_TEST_IR_TARGETS = CONFIG.get("internet_test_targets_ir")
+if not isinstance(INTERNET_TEST_IR_TARGETS, list) or not INTERNET_TEST_IR_TARGETS:
+    INTERNET_TEST_IR_TARGETS = []
+INTERNET_TEST_IR_TARGETS = [str(x).strip() for x in INTERNET_TEST_IR_TARGETS if str(x).strip()]
 
 NFT_TABLE_FAMILY = str(CONFIG.get("nft_table_family") or "inet")
 NFT_TABLE_NAME = str(CONFIG.get("nft_table_name") or "wanmon")
@@ -163,6 +177,7 @@ health_state = {
     wan_id: {
         "gateway_online": None,
         "internet_online": None,
+        "internet_ir_online": None,
         "gateway_rtt_ms": None,
         "gateway_jitter_ms": None,
         "gateway_loss_percent": None,
@@ -170,6 +185,10 @@ health_state = {
         "internet_jitter_ms": None,
         "internet_loss_percent": None,
         "internet_target": None,
+        "internet_ir_rtt_ms": None,
+        "internet_ir_jitter_ms": None,
+        "internet_ir_loss_percent": None,
+        "internet_ir_target": None,
         "last_checked": 0,
     }
     for wan_id in WANS.keys()
@@ -181,6 +200,8 @@ quality_samples = {
         "gateway_rtt": deque(maxlen=QUALITY_WINDOW),
         "internet_success": deque(maxlen=QUALITY_WINDOW),
         "internet_rtt": deque(maxlen=QUALITY_WINDOW),
+        "internet_ir_success": deque(maxlen=QUALITY_WINDOW),
+        "internet_ir_rtt": deque(maxlen=QUALITY_WINDOW),
     }
     for wan_id in WANS.keys()
 }
@@ -416,6 +437,7 @@ last_state_flush = 0.0
 
 
 PING_RTT_RE = re.compile(r"time[=<]([0-9]+(?:\.[0-9]+)?)\s*ms")
+PING_RESOLVED_IP_RE = re.compile(r"^PING\s+[^\s]+\s+\(([^)]+)\)")
 
 NEIGH_OK_STATES = {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"}
 NEIGH_BAD_STATES = {"FAILED", "INCOMPLETE"}
@@ -440,6 +462,91 @@ def ping_once(ip: str, timeout: int = 1, source_ip: str | None = None) -> tuple[
         return True, float(match.group(1))
     except ValueError:
         return True, None
+
+
+def ping_probe_once(target: str, timeout: int = 1, source_ip: str | None = None) -> tuple[bool, float | None, str | None]:
+    args = ["ping", "-n", "-c", "1", "-W", str(timeout)]
+    if source_ip:
+        args.extend(["-I", source_ip])
+    args.append(target)
+
+    stdout, _, code = run_command(args, timeout=timeout + 1)
+
+    resolved_ip = None
+    if stdout:
+        first_line = stdout.splitlines()[0] if stdout.splitlines() else ""
+        match = PING_RESOLVED_IP_RE.search(first_line)
+        if match:
+            resolved_ip = match.group(1)
+
+    if code != 0:
+        return False, None, resolved_ip
+
+    match = PING_RTT_RE.search(stdout)
+    if not match:
+        return True, None, resolved_ip
+
+    try:
+        return True, float(match.group(1)), resolved_ip
+    except ValueError:
+        return True, None, resolved_ip
+
+
+def tcp_connect_once(
+    ip: str,
+    port: int = 443,
+    timeout: float = 1.0,
+    source_ip: str | None = None,
+) -> tuple[bool, float | None]:
+    if not ip:
+        return False, None
+
+    started = time.time()
+    sock: socket.socket | None = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+
+        if source_ip:
+            sock.bind((source_ip, 0))
+
+        sock.connect((ip, int(port)))
+        rtt_ms = (time.time() - started) * 1000.0
+        return True, round(rtt_ms, 1)
+    except ConnectionRefusedError:
+        rtt_ms = (time.time() - started) * 1000.0
+        return True, round(rtt_ms, 1)
+    except OSError:
+        return False, None
+    finally:
+        try:
+            if sock:
+                sock.close()
+        except OSError:
+            pass
+
+
+def probe_internet_target(
+    target: str,
+    timeout: int = 1,
+    source_ip: str | None = None,
+    tcp_fallback_port: int = 443,
+) -> tuple[bool, float | None]:
+    ok, rtt, resolved_ip = ping_probe_once(target, timeout=timeout, source_ip=source_ip)
+    if ok:
+        return True, rtt
+
+    if resolved_ip:
+        tcp_ok, tcp_rtt = tcp_connect_once(
+            resolved_ip,
+            port=tcp_fallback_port,
+            timeout=float(timeout),
+            source_ip=source_ip,
+        )
+        if tcp_ok:
+            return True, tcp_rtt
+
+    return False, None
 
 
 def read_neighbor_state(ip: str, iface: str | None = None) -> str | None:
@@ -861,6 +968,7 @@ def speed_collector_loop():
                 "iface_tx_errors": iface_metrics.get("tx_errors") if iface_metrics else None,
                 "gateway_online": health.get("gateway_online"),
                 "internet_online": health.get("internet_online"),
+                "internet_ir_online": health.get("internet_ir_online"),
                 "gateway_rtt_ms": health.get("gateway_rtt_ms"),
                 "gateway_jitter_ms": health.get("gateway_jitter_ms"),
                 "gateway_loss_percent": health.get("gateway_loss_percent"),
@@ -868,6 +976,10 @@ def speed_collector_loop():
                 "internet_jitter_ms": health.get("internet_jitter_ms"),
                 "internet_loss_percent": health.get("internet_loss_percent"),
                 "internet_target": health.get("internet_target"),
+                "internet_ir_rtt_ms": health.get("internet_ir_rtt_ms"),
+                "internet_ir_jitter_ms": health.get("internet_ir_jitter_ms"),
+                "internet_ir_loss_percent": health.get("internet_ir_loss_percent"),
+                "internet_ir_target": health.get("internet_ir_target"),
                 "health_last_checked": health.get("last_checked", 0),
                 "upload_total": upload_total,
                 "download_total": download_total,
@@ -918,6 +1030,8 @@ def health_collector_loop():
                     "gateway_rtt": deque(maxlen=QUALITY_WINDOW),
                     "internet_success": deque(maxlen=QUALITY_WINDOW),
                     "internet_rtt": deque(maxlen=QUALITY_WINDOW),
+                    "internet_ir_success": deque(maxlen=QUALITY_WINDOW),
+                    "internet_ir_rtt": deque(maxlen=QUALITY_WINDOW),
                 }
                 quality_samples[wan_id] = samples
 
@@ -943,8 +1057,8 @@ def health_collector_loop():
             internet_target = None
 
             # Test internet independently from gateway reachability.
-            for target in INTERNET_TEST_IPS:
-                ok, rtt = ping_once(
+            for target in INTERNET_TEST_GLOBAL_TARGETS:
+                ok, rtt = probe_internet_target(
                     target,
                     timeout=1,
                     source_ip=wan.get("source_ip") or None,
@@ -958,16 +1072,45 @@ def health_collector_loop():
             samples["internet_success"].append(internet_online)
             samples["internet_rtt"].append(internet_rtt_ms)
 
+            internet_ir_online: bool | None = None
+            internet_ir_rtt_ms = None
+            internet_ir_target = None
+
+            if INTERNET_TEST_IR_TARGETS:
+                internet_ir_online = False
+                for target in INTERNET_TEST_IR_TARGETS:
+                    ok, rtt = probe_internet_target(
+                        target,
+                        timeout=1,
+                        source_ip=wan.get("source_ip") or None,
+                    )
+                    if ok:
+                        internet_ir_online = True
+                        internet_ir_rtt_ms = rtt
+                        internet_ir_target = target
+                        break
+
+                samples["internet_ir_success"].append(internet_ir_online)
+                samples["internet_ir_rtt"].append(internet_ir_rtt_ms)
+            else:
+                if samples.get("internet_ir_success"):
+                    samples["internet_ir_success"].clear()
+                if samples.get("internet_ir_rtt"):
+                    samples["internet_ir_rtt"].clear()
+
             gateway_loss_percent = compute_loss_percent(samples["gateway_success"])
             internet_loss_percent = compute_loss_percent(samples["internet_success"])
+            internet_ir_loss_percent = compute_loss_percent(samples["internet_ir_success"])
 
             gateway_avg_rtt_ms, gateway_jitter_ms = compute_rtt_stats(samples["gateway_rtt"])
             internet_avg_rtt_ms, internet_jitter_ms = compute_rtt_stats(samples["internet_rtt"])
+            internet_ir_avg_rtt_ms, internet_ir_jitter_ms = compute_rtt_stats(samples["internet_ir_rtt"])
 
             with state_lock:
                 health_state[wan_id] = {
                     "gateway_online": gateway_online,
                     "internet_online": internet_online,
+                    "internet_ir_online": internet_ir_online,
                     "gateway_rtt_ms": gateway_avg_rtt_ms,
                     "gateway_jitter_ms": gateway_jitter_ms,
                     "gateway_loss_percent": gateway_loss_percent,
@@ -975,6 +1118,10 @@ def health_collector_loop():
                     "internet_jitter_ms": internet_jitter_ms,
                     "internet_loss_percent": internet_loss_percent,
                     "internet_target": internet_target,
+                    "internet_ir_rtt_ms": internet_ir_avg_rtt_ms,
+                    "internet_ir_jitter_ms": internet_ir_jitter_ms,
+                    "internet_ir_loss_percent": internet_ir_loss_percent,
+                    "internet_ir_target": internet_ir_target,
                     "last_checked": now,
                 }
 
@@ -1471,7 +1618,8 @@ PAGE_HTML = """
     const HELP_FA = {
         link: "وضعیت لینک اینترفیس (بالا/پایین بودن لینک).",
         gateway: "دسترس‌پذیری گیت‌وی از مبدا همین لینک (ICMP یا وضعیت neighbor/ARP).",
-        internet: "دسترسی به اینترنت از مبدا همین لینک (اولین مقصد پاسخ‌گو انتخاب می‌شود).",
+        internet: "دسترسی به اینترنت جهانی از مبدا همین لینک (ICMP یا TCP/443؛ اولین مقصد پاسخ‌گو انتخاب می‌شود).",
+        internetIr: "دسترسی به اینترنت/سرویس داخل ایران از مبدا همین لینک (ICMP یا TCP/443؛ مقاصد از config خوانده می‌شود).",
         default: "یعنی مسیر پیش‌فرض فعلی سیستم روی همین لینک است.",
         standby: "یعنی مسیر پیش‌فرض فعلی سیستم روی این لینک نیست.",
         sourceIp: "آی‌پی مبدا تست‌ها (پینگ از همین آی‌پی ارسال می‌شود).",
@@ -1575,6 +1723,7 @@ PAGE_HTML = """
         if (label === "Link") helpKey = "link";
         else if (label === "Gateway") helpKey = "gateway";
         else if (label === "Internet") helpKey = "internet";
+        else if (label === "IR") helpKey = "internetIr";
 
         const helpAttr = helpKey ? ` data-help="${helpKey}"` : "";
 
@@ -1928,6 +2077,7 @@ PAGE_HTML = """
                     ${statusBadge(wan.iface_up, "Link")}
                     ${statusBadge(wan.gateway_online, "Gateway")}
                     ${statusBadge(wan.internet_online, "Internet")}
+                    ${statusBadge(wan.internet_ir_online, "IR")}
                     <span class="badge ${isActive ? "active" : "standby"}" data-help="${isActive ? "default" : "standby"}">
                         ${isActive ? "DEFAULT" : "STANDBY"}
                     </span>
@@ -2003,6 +2153,16 @@ PAGE_HTML = """
                 <div class="row">
                     <span class="help" data-help="jitterTarget">NET Jitter / Target</span>
                     <span class="value">${formatMs(wan.internet_jitter_ms)} / ${(wan.internet_target || "-")}</span>
+                </div>
+
+                <div class="row">
+                    <span class="help" data-help="rttLoss">IR RTT / Loss</span>
+                    <span class="value">${formatMs(wan.internet_ir_rtt_ms)} / ${formatPct(wan.internet_ir_loss_percent)}</span>
+                </div>
+
+                <div class="row">
+                    <span class="help" data-help="jitterTarget">IR Jitter / Target</span>
+                    <span class="value">${formatMs(wan.internet_ir_jitter_ms)} / ${(wan.internet_ir_target || "-")}</span>
                 </div>
             `;
         });
