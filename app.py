@@ -880,19 +880,18 @@ def health_collector_loop():
             internet_rtt_ms = None
             internet_target = None
 
-            # Only test internet if gateway is reachable
-            if gateway_online:
-                for target in INTERNET_TEST_IPS:
-                    ok, rtt = ping_once(
-                        target,
-                        timeout=1,
-                        source_ip=wan.get("source_ip") or None,
-                    )
-                    if ok:
-                        internet_online = True
-                        internet_rtt_ms = rtt
-                        internet_target = target
-                        break
+            # Test internet independently from gateway reachability.
+            for target in INTERNET_TEST_IPS:
+                ok, rtt = ping_once(
+                    target,
+                    timeout=1,
+                    source_ip=wan.get("source_ip") or None,
+                )
+                if ok:
+                    internet_online = True
+                    internet_rtt_ms = rtt
+                    internet_target = target
+                    break
 
             samples["internet_success"].append(internet_online)
             samples["internet_rtt"].append(internet_rtt_ms)

@@ -8,3 +8,5 @@ venv/
 config.json
 *.log
 .DS_Store
+wan-panel-state.json
+wan-panel-state.json.tmp
